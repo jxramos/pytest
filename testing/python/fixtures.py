@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import textwrap
@@ -3671,6 +3672,73 @@ class TestShowFixtures:
             @pytest.fixture
             def foo():
                 raise NotImplementedError()
+
+
+class TestFixturesInJson:
+    @staticmethod
+    def load_fixture_data(json_out_file):
+        with open(json_out_file) as fd:
+            fixture_data = json.load(fd)
+        return fixture_data
+
+    def test_show_help(self, pytester: Pytester) -> None:
+        """tests that the help option retains precedence over the --fixtures-json option"""
+        json_out_file = os.path.join(pytester.path, "test_out.json")
+        result = pytester.runpytest("--fixtures-json", json_out_file, "--help")
+        assert not result.ret
+
+    def test_fixtures_in_json(self, pytester: Pytester, ) -> None:
+        """tests that a few of the built in fixtures show up in the json output"""
+        json_out_file = os.path.join(pytester.path, "test_out.json")
+        pytester.runpytest("--fixtures-json", json_out_file)
+
+        fixture_data = TestFixturesInJson.load_fixture_data(json_out_file)
+        found_fixtures = [fd["name"] for fd in fixture_data]
+        assert ("tmp_path_factory" in found_fixtures) and ("tmp_path" in found_fixtures)
+
+    def test_fixtures_in_testmodule_in_json(self, pytester: Pytester) -> None:
+        """tests that fixtures defined in a test module at file scope show up in the json output"""
+        pytester.makepyfile(
+            '''
+            import pytest
+            @pytest.fixture
+            def _arg0():
+                """ hidden """
+            @pytest.fixture
+            def arg1():
+                """  hello world """
+        '''
+        )
+        json_out_file = os.path.join(pytester.path, "test_out.json")
+        pytester.runpytest("--fixtures-json", json_out_file)
+        fixture_data = TestFixturesInJson.load_fixture_data(json_out_file)
+        found_fixtures = [fd["name"] for fd in fixture_data]
+        assert ("arg1" in found_fixtures) and ("_arg0" not in found_fixtures)
+
+    @pytest.mark.parametrize("testmod", [True, False])
+    def test_fixtures_in_conftest_in_json(self, pytester: Pytester, testmod) -> None:
+        """tests that fixtures defined in a conftest file with or with out a module still show up in the json output"""
+        pytester.makeconftest(
+            '''
+            import pytest
+            @pytest.fixture
+            def fixture_in_conftest():
+                """  hello world """
+        '''
+        )
+        if testmod:
+            pytester.makepyfile(
+                """
+                def test_hello():
+                    pass
+            """
+            )
+        json_out_file = os.path.join(pytester.path, "test_out.json")
+        pytester.runpytest("--fixtures-json", json_out_file)
+
+        fixture_data = TestFixturesInJson.load_fixture_data(json_out_file)
+        found_fixtures = [fd["name"] for fd in fixture_data]
+        assert "fixture_in_conftest" in found_fixtures
 
 
 class TestContextManagerFixtureFuncs:
