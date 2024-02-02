@@ -100,6 +100,13 @@ def pytest_addoption(parser: Parser) -> None:
         "(fixtures with leading '_' are only shown with '-v')",
     )
     group.addoption(
+        "--fixtures-json",
+        dest="fixture_data_json_path",
+        default="fixture_data.json",
+        help="Writes all available fixtures and their associated metadata (name, baseid, module, path, scope, docstring) to a json file"
+        "(fixtures with leading '_' are only shown with '-v')",
+    )
+    group.addoption(
         "--fixtures-per-test",
         action="store_true",
         dest="show_fixtures_per_test",
@@ -137,6 +144,9 @@ def pytest_addoption(parser: Parser) -> None:
 def pytest_cmdline_main(config: Config) -> Optional[Union[int, ExitCode]]:
     if config.option.showfixtures:
         showfixtures(config)
+        return 0
+    if config.option.fixture_data_json_path:
+        write_fixture_data_json(config)
         return 0
     if config.option.show_fixtures_per_test:
         show_fixtures_per_test(config)
@@ -1667,51 +1677,37 @@ def showfixtures(config: Config) -> Union[int, ExitCode]:
 def _showfixtures_main(config: Config, session: Session) -> None:
     import _pytest.config
 
-    session.perform_collect()
-    curdir = Path.cwd()
     tw = _pytest.config.create_terminal_writer(config)
     verbose = config.getvalue("verbose")
 
-    fm = session._fixturemanager
+    available = _collect_fixtures(config, session)
 
-    available = []
-    seen: Set[Tuple[str, str]] = set()
-
-    for argname, fixturedefs in fm._arg2fixturedefs.items():
-        assert fixturedefs is not None
-        if not fixturedefs:
-            continue
-        for fixturedef in fixturedefs:
-            loc = getlocation(fixturedef.func, str(curdir))
-            if (fixturedef.argname, loc) in seen:
-                continue
-            seen.add((fixturedef.argname, loc))
-            available.append(
-                (
-                    len(fixturedef.baseid),
-                    fixturedef.func.__module__,
-                    _pretty_fixture_path(fixturedef.func),
-                    fixturedef.argname,
-                    fixturedef,
-                )
-            )
-
-    available.sort()
     currentmodule = None
-    for baseid, module, prettypath, argname, fixturedef in available:
+    for fixture_data in available:
+        # Open a module header section
+        module = fixture_data["module"]
         if currentmodule != module:
             if not module.startswith("_pytest."):
                 tw.line()
                 tw.sep("-", f"fixtures defined from {module}")
                 currentmodule = module
-        if verbose <= 0 and argname.startswith("_"):
-            continue
-        tw.write(f"{argname}", green=True)
-        if fixturedef.scope != "function":
-            tw.write(" [%s scope]" % fixturedef.scope, cyan=True)
+
+        # Report fixture name
+        name = fixture_data["name"]
+        tw.write(f"{name}", green=True)
+
+        # Report fixture scope for non-default values
+        scope = fixture_data["scope"]
+        if scope != "function":
+            tw.write(" [%s scope]" % scope, cyan=True)
+
+        # Report fixture path
+        prettypath = fixture_data["path"]
         tw.write(f" -- {prettypath}", yellow=True)
         tw.write("\n")
-        doc = inspect.getdoc(fixturedef.func)
+
+        # Report fixture docstring
+        doc = fixture_data["docstring"]
         if doc:
             write_docstring(tw, doc.split("\n\n")[0] if verbose <= 0 else doc)
         else:
@@ -1722,6 +1718,78 @@ def _showfixtures_main(config: Config, session: Session) -> None:
 def write_docstring(tw: TerminalWriter, doc: str, indent: str = "    ") -> None:
     for line in doc.split("\n"):
         tw.line(indent + line)
+
+
+def write_fixture_data_json(config: Config) -> Union[int, ExitCode]:
+    from _pytest.main import wrap_session
+
+    return wrap_session(config, _write_fixture_data_json)
+
+
+def _write_fixture_data_json(config: Config, session: Session) -> None:
+    """
+    Writes all available fixture data to a json file.
+    """
+    import json
+
+    # Write available fixture data to the configured json file path
+    available = _collect_fixtures(config, session)
+    out_json_file = config.option.fixture_data_json_path
+    with open(out_json_file, "w") as json_file:
+        json.dump(available, json_file)
+
+    # Report the json file the fixture data was written to
+    tw = _pytest.config.create_terminal_writer(config)
+    tw.write(f"fixture data written to json file: {out_json_file}")
+
+
+def _collect_fixtures(config, session):
+    """
+    Loads all fixtures in session and converts them to dicts of fixture metadata.
+
+    :returns available: list<dict> a list of dicts containing the metadata for that fixture including
+        the fixture's baseid, the module where the fixture function is defined, the path, name, scope,
+        and docstring of the fixture.
+    """
+    # execute collection phase to populate the fixture manager
+    session.perform_collect()
+
+    # collate the fixture data into a list of dicts
+    available = []
+    seen: Set[Tuple[str, str]] = set()
+    curdir = Path.cwd()
+    verbose = config.getvalue("verbose")
+    fm = session._fixturemanager
+
+    for fixturedefs in fm._arg2fixturedefs.values():
+        assert fixturedefs is not None
+        if not fixturedefs:
+            continue
+        for fixturedef in fixturedefs:
+            # bookkeep name and location to avoid duplicates
+            loc = getlocation(fixturedef.func, str(curdir))
+            name = fixturedef.argname
+            if (name, loc) in seen:
+                continue
+            seen.add((name, loc))
+
+            # ignore _xxx fixtures when verbosity doesn't warrant it
+            if verbose <= 0 and name.startswith("_"):
+                continue
+
+            # available fixture found, retain its data
+            available.append(
+                {
+                    "name": name,
+                    "baseid": len(fixturedef.baseid),
+                    "module": fixturedef.func.__module__,
+                    "path": _pretty_fixture_path(fixturedef.func),
+                    "scope": fixturedef.scope,
+                    "docstring": inspect.getdoc(fixturedef.func),
+                }
+            )
+    available.sort(key=lambda fix_data: (fix_data["baseid"], fix_data["module"], fix_data["path"], fix_data["name"], fix_data["scope"]))
+    return available
 
 
 class Function(PyobjMixin, nodes.Item):
