@@ -102,7 +102,6 @@ def pytest_addoption(parser: Parser) -> None:
     group.addoption(
         "--fixtures-json",
         dest="fixture_data_json_path",
-        default="fixture_data.json",
         help="Writes all available fixtures and their associated metadata (name, baseid, module, path, scope, docstring) to a json file"
         "(fixtures with leading '_' are only shown with '-v')",
     )
